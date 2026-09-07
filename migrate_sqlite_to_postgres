@@ -1,0 +1,93 @@
+"""
+انتقال داده‌های SQLite قدیمی به PostgreSQL.
+
+اجرا:
+  pip install psycopg[binary]
+  set DATABASE_URL=...
+  set SQLITE_PATH=sardar_app_store.db
+  python migrate_sqlite_to_postgres.py
+
+Linux/macOS:
+  DATABASE_URL='...' SQLITE_PATH='sardar_app_store.db' python migrate_sqlite_to_postgres.py
+"""
+import os
+import sqlite3
+import psycopg
+
+SQLITE_PATH = os.getenv("SQLITE_PATH", "sardar_app_store.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL تنظیم نشده است.")
+
+TABLES = [
+    "apple_ids", "emails", "users", "user_purchases", "failed_purchases",
+    "bot_settings", "temp_orders", "warranty_requests", "unlock_requests"
+]
+COLUMNS = {
+    "apple_ids": ["id","apple_id","password","birth_date","school","job","parentsmeet","security_q1","security_a1","security_q2","security_a2","security_q3","security_a3","product_type","icloud_status","warranty_type","used","user_id","date_used"],
+    "emails": ["id","email","password","used","user_id","date_used"],
+    "users": ["user_id","balance","join_date","first_name","last_name","phone","email","birth_date"],
+    "user_purchases": ["id","user_id","order_id","product_type","product_detail","password","purchase_date","status"],
+    "failed_purchases": ["id","user_id","product_type","price","reason","date"],
+    "bot_settings": ["setting_key","setting_value"],
+    "temp_orders": ["order_id","user_id","product_name","price","email","email_option","is_for_apple","photo_id","status","created_at","updated_at","icloud_status","warranty_type","order_type"],
+    "warranty_requests": ["id","user_id","apple_id","request_date","status"],
+    "unlock_requests": ["id","user_id","apple_id","password","email","email_password","request_date","status"],
+}
+PK = {
+    "apple_ids":"id", "emails":"id", "users":"user_id", "user_purchases":"id",
+    "failed_purchases":"id", "bot_settings":"setting_key", "temp_orders":"order_id",
+    "warranty_requests":"id", "unlock_requests":"id"
+}
+IDENTITY_TABLES = [
+    "apple_ids", "emails", "user_purchases", "failed_purchases",
+    "warranty_requests", "unlock_requests"
+]
+
+
+def main():
+    if not os.path.exists(SQLITE_PATH):
+        raise FileNotFoundError(f"فایل SQLite پیدا نشد: {os.path.abspath(SQLITE_PATH)}")
+
+    sconn = sqlite3.connect(SQLITE_PATH)
+    sconn.row_factory = sqlite3.Row
+    pconn = psycopg.connect(DATABASE_URL)
+
+    try:
+        with pconn.cursor() as pc:
+            for table in TABLES:
+                cols = COLUMNS[table]
+                rows = sconn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+                print(f"{table}: {len(rows)} رکورد")
+                if not rows:
+                    continue
+
+                placeholders = ", ".join(["%s"] * len(cols))
+                col_sql = ", ".join(cols)
+                pk = PK[table]
+                update_cols = [c for c in cols if c != pk]
+                updates = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+                sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) ON CONFLICT ({pk}) DO UPDATE SET {updates}"
+                for row in rows:
+                    pc.execute(sql, tuple(row[c] for c in cols))
+
+            # بعد از وارد کردن IDهای قدیمی، sequenceهای PostgreSQL را جلو می‌بریم.
+            for table in IDENTITY_TABLES:
+                pc.execute(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 1), "
+                    f"(SELECT COUNT(*) > 0 FROM {table}))"
+                )
+
+        pconn.commit()
+        print("\n✅ انتقال SQLite → PostgreSQL با موفقیت انجام شد.")
+    except Exception:
+        pconn.rollback()
+        raise
+    finally:
+        sconn.close()
+        pconn.close()
+
+
+if __name__ == "__main__":
+    main()
